@@ -1,6 +1,15 @@
-# AI Trend Hunter v0.2
+# AI Trend Hunter V2 — Efficient Pipeline
 
-Windows용 로컬 AI 트렌드 수집·분석 앱입니다. API 키 없이 GeekNews RSS, Hacker News 공식 API, GitHub 공개 검색을 수집하고, ego(lite)로 원문을 읽은 뒤 Ollama가 분류·요약합니다. 정보가 부족한 항목만 허용된 링크에서 추가 탐색하고 모든 출처·본문·분석·실행 로그를 SQLite에 저장합니다.
+Windows용 로컬 AI 트렌드 수집·분석 앱입니다. V2는 메타데이터를 먼저 평가해 가치가 높거나 불확실한 항목만 ego(lite)로 읽고, URL 캐시를 재사용합니다. Ollama의 분류·요약과 트렌드 점수 평가를 별도 호출로 분리하며, 근거 수준에 따른 신뢰도를 함께 저장합니다.
+
+## V2 핵심 변경사항
+
+1. 규칙 기반 메타데이터 점수와 불확실성으로 브라우저 후보를 먼저 선별
+2. SQLite URL 캐시로 동일 원문 재방문 방지(기본 24시간)
+3. 원문·캐시·메타데이터 전용 결과를 구분하고 신뢰도 상한 적용
+4. 분류·요약과 트렌드 점수 평가를 별도 Ollama 요청으로 분리
+5. novelty·usefulness·impact 가중치로 최종 점수 계산
+6. 강한 AI 키워드가 있을 때만 4B 모델의 `기타` 오분류를 보수적으로 보정
 
 ## 가장 쉬운 실행 방법
 
@@ -43,17 +52,17 @@ PowerShell 실행 정책이 스크립트를 막으면 `powershell -ExecutionPoli
 ## 파이프라인
 
 1. GeekNews·HN·GitHub 후보 수집 및 SQLite upsert
-2. 전용 ego(lite) TaskSpace에서 상위 원문 읽기
-3. Ollama JSON 스키마 응답으로 카테고리·요약·점수·추가 조사 여부 결정
-4. 모델이 고른 **추출된 허용 링크**만 최대 3개 추가 탐색
-5. 추가 근거를 반영해 최종 분석 후 SQLite 저장
-6. 한 출처/브라우저가 실패해도 가능한 결과는 `partial` 상태로 보존
+2. 제목·설명·날짜·인기도로 메타데이터 점수와 불확실성 계산
+3. 상위 점수·불확실 후보만 캐시 확인 후 ego(lite) 원문 탐색
+4. Ollama 분류·요약과 세부 점수 평가를 별도로 실행
+5. 모델이 고른 **추출된 허용 링크**만 선택적으로 추가 탐색
+6. 근거 수준과 신뢰도를 포함한 최종 결과를 SQLite에 저장
 
 LG Gram의 CPU/RAM 사용량을 줄이기 위해 Ollama 컨텍스트는 8K, 분석 출력은 500토큰으로 제한합니다.
 
 ## 데이터와 설정
 
-- DB: `data/trend_hunter.db`
+- DB: `data/trend_hunter.db` (`page_cache` 테이블 포함)
 - 환경 변수 예시: `.env.example` (앱이 `.env` 파일을 자동 로드하지 않으므로 PowerShell 환경 변수로 설정)
 - 빠른 시험은 `TREND_HUNTER_PER_SOURCE_LIMIT=1`, `TREND_HUNTER_INITIAL_BROWSER_LIMIT=1`, `TREND_HUNTER_FOLLOWUP_LIMIT=1`로 축소할 수 있습니다.
 - GitHub 토큰은 선택 사항입니다. 없으면 공개 API의 낮은 호출 한도를 사용합니다.
@@ -152,7 +161,7 @@ ego(lite)가 방문한 URL, 페이지 제목, 추출 본문, 발견한 링크, �
 
 ## Streamlit 화면
 
-- **결과:** 출처·카테고리·최소 점수 필터, 원문 링크, 요약, CSV 다운로드
+- **결과:** 출처·카테고리·최소 점수·최소 신뢰도·근거 수준 필터, 원문 링크, 요약, CSV 다운로드
 - **실행 기록:** 과거 실행 상태와 단계별 로그 조회
 - **진단:** Python, SQLite, Ollama, 모델, ego-browser CLI 및 실제 ego(lite) 연결 검사
 
@@ -173,6 +182,13 @@ ego(lite)가 방문한 URL, 페이지 제목, 추출 본문, 발견한 링크, �
 - ego(lite) 실제 연결 및 UI 버튼 조작 성공
 - GeekNews·Hacker News·GitHub 각 1건, 총 3건 실제 처리
 - 수집 3건, 분석 3건, 오류 0건, 최종 상태 `completed`
+
+V2 캐시 실전 검증에서는 동일한 GitHub AI 저장소를 연속 실행했습니다.
+
+- 첫 실행: `browser_pages=1`, `cache_hits=0`, `browser_status=connected`
+- 두 번째 실행: `browser_pages=0`, `cache_hits=1`, `browser_status=cache_only`
+- 두 실행 모두 수집 1건, 분석 1건, 오류 0건
+- 원문 결과 신뢰도 90, 캐시 원문 결과 신뢰도 80으로 저장
 
 ## 현재 한계와 개선 방향
 

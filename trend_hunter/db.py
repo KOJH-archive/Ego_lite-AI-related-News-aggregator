@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS runs (
   browser_status TEXT,
   collected_count INTEGER DEFAULT 0,
   analyzed_count INTEGER DEFAULT 0,
-  error_count INTEGER DEFAULT 0
+  error_count INTEGER DEFAULT 0,
+  browser_count INTEGER DEFAULT 0,
+  cache_hit_count INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,6 +48,11 @@ CREATE TABLE IF NOT EXISTS analyses (
   why_it_matters TEXT,
   trend_score INTEGER,
   needs_followup INTEGER NOT NULL DEFAULT 0,
+  confidence INTEGER NOT NULL DEFAULT 0,
+  evidence_level TEXT NOT NULL DEFAULT 'metadata_only',
+  metadata_score INTEGER NOT NULL DEFAULT 0,
+  uncertain INTEGER NOT NULL DEFAULT 0,
+  score_reason TEXT,
   model TEXT,
   created_at TEXT NOT NULL,
   UNIQUE(item_id, run_id)
@@ -71,8 +78,17 @@ CREATE TABLE IF NOT EXISTS run_events (
   message TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS page_cache (
+  url TEXT PRIMARY KEY,
+  title TEXT,
+  content TEXT NOT NULL,
+  links_json TEXT NOT NULL,
+  backend TEXT,
+  fetched_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_items_source_seen ON items(source, last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_analyses_score ON analyses(trend_score DESC);
+CREATE INDEX IF NOT EXISTS idx_page_cache_fetched ON page_cache(fetched_at DESC);
 """
 
 
@@ -86,6 +102,28 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        additions = {
+            "runs": {
+                "browser_count": "INTEGER DEFAULT 0",
+                "cache_hit_count": "INTEGER DEFAULT 0",
+            },
+            "analyses": {
+                "confidence": "INTEGER NOT NULL DEFAULT 0",
+                "evidence_level": "TEXT NOT NULL DEFAULT 'metadata_only'",
+                "metadata_score": "INTEGER NOT NULL DEFAULT 0",
+                "uncertain": "INTEGER NOT NULL DEFAULT 0",
+                "score_reason": "TEXT",
+            },
+        }
+        for table, columns in additions.items():
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for name, definition in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     @contextmanager
     def connect(self):
@@ -110,7 +148,8 @@ class Database:
             )
 
     def finish_run(self, run_id: int, **fields: Any) -> None:
-        allowed = {"status", "model", "browser_status", "collected_count", "analyzed_count", "error_count"}
+        allowed = {"status", "model", "browser_status", "collected_count", "analyzed_count", "error_count",
+                   "browser_count", "cache_hit_count"}
         values = {key: value for key, value in fields.items() if key in allowed}
         values["finished_at"] = utcnow()
         clause = ",".join(f"{key}=?" for key in values)
@@ -147,16 +186,51 @@ class Database:
     def save_analysis(self, item_id: int, run_id: int, analysis: dict[str, Any], model: str) -> None:
         with self.connect() as conn:
             conn.execute(
-                """INSERT OR REPLACE INTO analyses(item_id,run_id,category,summary,why_it_matters,trend_score,needs_followup,model,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?)""",
+                """INSERT OR REPLACE INTO analyses(
+                item_id,run_id,category,summary,why_it_matters,trend_score,needs_followup,
+                confidence,evidence_level,metadata_score,uncertain,score_reason,model,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (item_id, run_id, analysis.get("category", "기타"), analysis.get("summary", ""),
                  analysis.get("why_it_matters", ""), int(analysis.get("trend_score", 0)),
-                 int(bool(analysis.get("needs_followup"))), model, utcnow()),
+                 int(bool(analysis.get("needs_followup"))), int(analysis.get("confidence", 0)),
+                 analysis.get("evidence_level", "metadata_only"), int(analysis.get("metadata_score", 0)),
+                 int(bool(analysis.get("uncertain"))), analysis.get("score_reason", ""), model, utcnow()),
             )
+
+    def cache_page(self, result: dict[str, Any], backend: str, cache_url: str | None = None) -> None:
+        url = cache_url or result.get("url")
+        if not url or not result.get("content") or result.get("error"):
+            return
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO page_cache(url,title,content,links_json,backend,fetched_at)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,content=excluded.content,
+                links_json=excluded.links_json,backend=excluded.backend,fetched_at=excluded.fetched_at""",
+                (url, result.get("title", ""), result.get("content", ""),
+                 json.dumps(result.get("links", []), ensure_ascii=False), backend, utcnow()),
+            )
+
+    def cached_page(self, url: str, max_age_hours: int) -> dict[str, Any] | None:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM page_cache WHERE url=?", (url,)).fetchone()
+        if not row:
+            return None
+        try:
+            fetched_at = datetime.fromisoformat(row["fetched_at"])
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+            if fetched_at < cutoff:
+                return None
+        except (TypeError, ValueError):
+            return None
+        return {"url": row["url"], "title": row["title"], "content": row["content"],
+                "links": json.loads(row["links_json"] or "[]"), "cached_at": row["fetched_at"]}
 
     def results(self, limit: int = 200) -> list[dict[str, Any]]:
         query = """SELECT i.source,i.title,i.url,i.author,i.published_at,i.score,
-          a.category,a.summary,a.why_it_matters,a.trend_score,a.needs_followup,a.model,a.created_at
+          a.category,a.summary,a.why_it_matters,a.trend_score,a.needs_followup,a.confidence,
+          a.evidence_level,a.metadata_score,a.uncertain,a.score_reason,a.model,a.created_at
           FROM analyses a JOIN items i ON i.id=a.item_id ORDER BY a.created_at DESC,a.trend_score DESC LIMIT ?"""
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(query, (limit,)).fetchall()]

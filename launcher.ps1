@@ -19,7 +19,7 @@ function Test-Url([string]$Url, [int]$TimeoutSec = 3) {
 }
 
 try {
-    Write-Host "AI Trend Hunter v0.2 one-click launcher" -ForegroundColor Green
+    Write-Host "AI Trend Hunter V2 efficient-pipeline launcher" -ForegroundColor Green
 
     $python = Get-Command python -ErrorAction SilentlyContinue
     if (-not $python) {

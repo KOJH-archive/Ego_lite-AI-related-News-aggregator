@@ -9,9 +9,9 @@ from trend_hunter.diagnostics import run_diagnostics
 from trend_hunter.pipeline import Pipeline
 
 
-st.set_page_config(page_title="AI Trend Hunter", page_icon="🧭", layout="wide")
-st.title("🧭 AI Trend Hunter v0.2")
-st.caption("GeekNews · Hacker News · GitHub → ego(lite) → Ollama → 선택적 추가 탐색 → SQLite")
+st.set_page_config(page_title="AI Trend Hunter V2", page_icon="🧭", layout="wide")
+st.title("🧭 AI Trend Hunter V2 — Efficient Pipeline")
+st.caption("RSS/API → 메타데이터 사전평가 → 선택적 ego(lite)·캐시 → 분리형 Ollama 분석 → SQLite")
 
 settings = Settings()
 db = Database(settings.db_path)
@@ -32,7 +32,8 @@ if run_button:
     with st.spinner("수집·탐색·분석 중입니다. 로컬 모델 속도에 따라 몇 분 걸릴 수 있습니다."):
         report = Pipeline(settings, log=log).run(use_browser=use_browser)
     if report.status == "completed":
-        st.success(f"완료: {report.collected}개 수집 / {report.analyzed}개 분석")
+        st.success(f"완료: {report.collected}개 수집 / {report.analyzed}개 분석 / "
+                   f"브라우저 {report.browser_pages}개 / 캐시 {report.cache_hits}개")
     elif report.status == "partial":
         st.warning(f"부분 완료: {report.collected}개 수집 / {report.analyzed}개 분석")
     else:
@@ -50,7 +51,12 @@ with results_tab:
         sources = st.multiselect("출처", sorted(frame.source.unique()), default=sorted(frame.source.unique()))
         categories = st.multiselect("카테고리", sorted(frame.category.unique()), default=sorted(frame.category.unique()))
         minimum = st.slider("최소 트렌드 점수", 0, 100, 0)
-        shown = frame[frame.source.isin(sources) & frame.category.isin(categories) & (frame.trend_score >= minimum)]
+        confidence = st.slider("최소 신뢰도", 0, 100, 0)
+        evidence = st.multiselect("근거 수준", sorted(frame.evidence_level.unique()),
+                                  default=sorted(frame.evidence_level.unique()))
+        shown = frame[frame.source.isin(sources) & frame.category.isin(categories) &
+                      (frame.trend_score >= minimum) & (frame.confidence >= confidence) &
+                      frame.evidence_level.isin(evidence)]
         st.dataframe(shown, width="stretch", hide_index=True,
                      column_config={"url": st.column_config.LinkColumn("원문")})
         st.download_button("CSV 다운로드", shown.to_csv(index=False).encode("utf-8-sig"), "trend_hunter.csv", "text/csv")

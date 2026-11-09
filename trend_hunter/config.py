@@ -31,4 +31,6 @@ class Settings:
     per_source_limit: int = _int("TREND_HUNTER_PER_SOURCE_LIMIT", 8)
     initial_browser_limit: int = _int("TREND_HUNTER_INITIAL_BROWSER_LIMIT", 6)
     followup_limit: int = _int("TREND_HUNTER_FOLLOWUP_LIMIT", 3)
+    browser_min_metadata_score: int = _int("TREND_HUNTER_BROWSER_MIN_SCORE", 10)
+    page_cache_hours: int = _int("TREND_HUNTER_PAGE_CACHE_HOURS", 24)
 
